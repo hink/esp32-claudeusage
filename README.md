@@ -81,7 +81,20 @@ there's also no Wi-Fi setup and no secrets on the device.
 
 ## Quick start
 
-### 1. (Optional) Back up the factory firmware
+### 1. Give yourself access to the serial port (Linux)
+
+```sh
+sudo install -m 644 bridge/70-esp32-usb-serial.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+```
+
+Then unplug and replug the board. The udev rule gives whoever is logged in at the
+desktop access to the board's USB port every time it's plugged in, and keeps
+ModemManager from probing it. Joining the `dialout` group (`uucp` on Arch) also works,
+but only after you log out and back in. Until then, access granted by hand is lost
+each time you unplug the board.
+
+### 2. (Optional) Back up the factory firmware
 
 ```sh
 uvx --from esptool esptool -p /dev/ttyACM0 -b 921600 read-flash 0 0x1000000 factory-backup.bin
@@ -89,7 +102,7 @@ uvx --from esptool esptool -p /dev/ttyACM0 -b 921600 read-flash 0 0x1000000 fact
 
 Keep this file private. The factory app stores Wi-Fi credentials in flash if you ever set them.
 
-### 2. Build and flash the firmware
+### 3. Build and flash the firmware
 
 ```sh
 ./flash.sh
@@ -112,7 +125,7 @@ idf.py set-target esp32c6   # first time only
 idf.py build flash
 ```
 
-### 3. Start the bridge
+### 4. Start the bridge
 
 As a systemd user service, which starts at login and restarts on failure:
 
@@ -129,7 +142,7 @@ uv run bridge/claude_usage_bridge.py -v
 
 Within a few seconds the crab wakes up and your numbers appear.
 
-### 4. Calibrate auto-rotate (once)
+### 5. Calibrate auto-rotate (once)
 
 The accelerometer is fixed to the board, but its axes relative to the screen have to
 be measured once:
@@ -303,7 +316,7 @@ Bluetooth are never started.
 | Problem | Fix |
 |---|---|
 | Screen says "Waiting for PC bridge" | Check `systemctl --user status claude-usage-bridge` and `journalctl --user -u claude-usage-bridge`. |
-| `Permission denied: /dev/ttyACM0` | Add yourself to the serial group (`sudo usermod -aG dialout $USER` on most distros, `uucp` on Arch), then log out and back in. |
+| `Permission denied: /dev/ttyACM0`, or the screen stays on "Waiting for PC bridge" after replugging | Install the udev rule from [step 1](#1-give-yourself-access-to-the-serial-port-linux). Or add yourself to the serial group (`sudo usermod -aG dialout $USER` on most distros, `uucp` on Arch), then log out and back in. |
 | Flashing fails with "port is busy" | Something else has the port open. `flash.sh` stops the bridge for you; stop any serial monitors too. |
 | "Login expired - open Claude Code" | Run `claude` once. The bridge picks up the refreshed token within a minute. |
 | "Rate limited" | Wait. The bridge is already backing off. Don't lower `--interval`. |

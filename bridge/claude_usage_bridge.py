@@ -21,6 +21,7 @@ refresh token), it just re-reads the file.
 from __future__ import annotations
 
 import argparse
+import errno
 import glob
 import json
 import logging
@@ -359,6 +360,7 @@ class DeviceLink:
         self.ser: serial.Serial | None = None
         self.buf = b""
         self.next_try = 0.0
+        self.last_error = ""  # so a failing open is logged once, not every retry
 
     def _find_port(self) -> str | None:
         if self.port_arg:
@@ -380,6 +382,7 @@ class DeviceLink:
         self.next_try = time.monotonic() + 3
         path = self._find_port()
         if not path:
+            self.last_error = ""
             return False
         try:
             # Default DTR/RTS (both high) does not reset the ESP32-C6's USB
@@ -387,11 +390,18 @@ class DeviceLink:
             self.ser = serial.Serial(path, 115200, timeout=0.5, write_timeout=2)
             self.ser.reset_input_buffer()
             self.buf = b""
+            self.last_error = ""
             log.info("connected to display on %s", path)
             return True
         except (serial.SerialException, OSError) as e:
-            log.debug("can't open %s: %s", path, e)
             self.ser = None
+            if str(e) != self.last_error:
+                self.last_error = str(e)
+                if getattr(e, "errno", None) == errno.EACCES:
+                    log.warning("can't open %s: permission denied. Install "
+                                "bridge/70-esp32-usb-serial.rules (README, Quick start step 1)", path)
+                else:
+                    log.warning("can't open %s: %s", path, e)
             return False
 
     def close(self):

@@ -1,0 +1,14 @@
+# Espressif USB-Serial/JTAG (the built-in USB on ESP32-C3/C6/S3/H2), 303a:1001.
+#
+# Install:
+#   sudo install -m 644 bridge/70-esp32-usb-serial.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload
+# then unplug and replug the board.
+#
+# TAG+="uaccess"         systemd-logind gives the logged-in desktop user read/write
+#                        on the port every time it's plugged in, without joining the
+#                        dialout group. It has to be set before 73-seat-late.rules,
+#                        hence the 70- prefix.
+# ID_MM_DEVICE_IGNORE    keeps ModemManager from probing the port with AT commands.
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ENV{ID_MM_DEVICE_IGNORE}="1", TAG+="uaccess"
