@@ -1,0 +1,11 @@
+[Unit]
+Description=Claude usage bridge for the ESP32 AMOLED display
+After=network-online.target
+
+[Service]
+ExecStart=@UV@ run -q --script @REPO@/bridge/claude_usage_bridge.py @ARGS@
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

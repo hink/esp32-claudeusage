@@ -1,0 +1,14 @@
+# Build output and downloaded components
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Local flash dumps: may contain Wi-Fi credentials and vendor firmware
+backup/
+
+# Local overrides
+flash.env
+
+__pycache__/
+*.pyc
