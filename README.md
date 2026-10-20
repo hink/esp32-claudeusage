@@ -40,7 +40,7 @@ how long ago the numbers were fetched, and a small pixel crab that reacts to you
 - **Auto-rotate** using the on-board accelerometer, so it reads correctly on any edge.
 - **BOOT button** cycles brightness (100 / 70 / 40 / 15%). The setting is remembered.
 - **Burn-in protection:** the whole UI shifts a few pixels every 2 minutes.
-- **Smart polling:** every 5 minutes while you're using Claude Code, hourly when you're not, and once after each limit resets. It backs off hard on 429s and keeps its schedule across restarts.
+- **Smart polling:** every 5 minutes while you're using Claude Code, hourly when you're not, and once after each limit resets. It backs off hard on 429s, keeps its schedule across restarts, and makes no requests while the display is unplugged.
 - **Your token never leaves your computer.** The board has no network access and holds no credentials.
 
 ## How it works
@@ -202,6 +202,7 @@ nothing from them.
 | Idle, but there was activity since the last poll | once, straight away (catch-up) |
 | Idle | every 60 min, which also catches claude.ai or desktop-app use |
 | A 5-hour or weekly window just passed its reset time | once, 20 s after the reset |
+| Display unplugged | never; it polls once when you plug it back in, if a poll came due |
 
 A typical day comes to a few dozen requests instead of 288 at a flat 5 minutes.
 "Updated X ago" and the countdowns keep ticking on the board between polls. Tap the

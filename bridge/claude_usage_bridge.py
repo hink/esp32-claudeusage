@@ -485,6 +485,7 @@ def main():
     last_sent = 0.0
     last_hello = 0.0
     was_active = None
+    was_connected = None
     log.info("polling every %ds while Claude Code is active, every %ds when idle; cache at %s",
              args.interval, args.idle_interval, CACHE_PATH)
 
@@ -519,7 +520,14 @@ def main():
         if newly_connected and args.brightness is not None:
             link.send({"type": "config", "brightness": max(0, min(100, args.brightness))})
 
-        if poller.due(time.time()):
+        # No display, no API calls: polls wait until the board is plugged in.
+        connected = link.connected()
+        if connected != was_connected:
+            if not connected:
+                log.info("display not connected; pausing API calls until it's plugged in")
+            was_connected = connected
+
+        if connected and poller.due(time.time()):
             poller.fetch()
             push = True
 
