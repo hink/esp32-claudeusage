@@ -26,7 +26,9 @@ how long ago the numbers were fetched, and a small pixel crab that reacts to you
 ```
 
 > Unofficial fan project, not affiliated with or endorsed by Anthropic. It reads
-> an **undocumented** endpoint that could change or disappear at any time.
+> an **undocumented** endpoint that could change or disappear at any time, and
+> scripted use of a subscription login is outside Anthropic's terms. Read
+> [Terms of service](#terms-of-service) before you use it.
 
 ## Features
 
@@ -51,17 +53,17 @@ how long ago the numbers were fetched, and a small pixel crab that reacts to you
 │                                │ reads token   │  USB-C     │  countdowns      │
 │                                ▼               │  serial    │                  │
 │  claude_usage_bridge.py ─────────────────────────JSON lines─▶  link.c          │
-│        │ every 5 min                           │  (power +  │                  │
+│        │ 5 min active / 60 min idle            │  (power +  │                  │
 │        ▼                                       │   data)    │  accelerometer   │
 │  api.anthropic.com/api/oauth/usage             │            │  ──▶ rotation    │
 └────────────────────────────────────────────────┘            └──────────────────┘
 ```
 
 A small Python **bridge** runs on your computer. It reads the OAuth token Claude Code
-already keeps, calls the usage endpoint (more often while you're using Claude Code, less
-when you're not), and streams the results over the USB cable as JSON lines. The **firmware** only draws them. The board gets the time from the same
-messages, so countdowns and "Updated X ago" keep ticking between polls and even if the
-PC goes away.
+already keeps, calls the usage endpoint (often while you're using Claude Code, rarely
+when you're not), and streams the results over the USB cable as JSON lines. The
+**firmware** only draws them. The board gets the time from the same messages, so
+countdowns and "Updated X ago" keep ticking between polls and even if the PC goes away.
 
 Why USB instead of Wi-Fi? Claude Code refreshes its OAuth token on your computer. If
 the board fetched the data itself, it would need its own copy of the token, and
@@ -258,7 +260,7 @@ port. Opening the port with the default DTR/RTS doesn't reset the board.
 
 | Message | Purpose |
 |---|---|
-| `@{"type":"hello","fw":"1.1.0"}` | Sent every 5 s until the computer talks. The bridge replies with the cached state. |
+| `@{"type":"hello","fw":"1.2.0"}` | Sent every 5 s until the computer talks. The bridge replies with the cached state. |
 | `@{"type":"refresh"}` | The screen was tapped |
 | `@{"type":"imu","x":…,"y":…,"z":…,"up":1,"rot":0,"cal":[1,3,0]}` | Accelerometer reading |
 
@@ -307,6 +309,32 @@ Bluetooth are never started.
 | Sideways orientations are upside down | `uv run tools/calibrate_orientation.py --flip` |
 | Calibration says "Couldn't tell which way is up" | Hold the board still with one edge clearly down, not lying flat, then tap. |
 | Want the factory demo back | `uvx --from esptool esptool -p /dev/ttyACM0 -b 921600 write-flash 0 factory-backup.bin` |
+
+## Terms of service
+
+**Use this at your own risk.**
+
+- **Consumer Terms:** Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms), which cover Free, Pro and Max, prohibit accessing the services "through automated or non-human means, whether through a bot, script, or otherwise" unless you use an API key.
+- **Claude Code's legal page:** Claude Code's [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) says subscription OAuth "is designed to support ordinary use of Claude Code and other native Anthropic applications." Anthropic may enforce this "without prior notice."
+
+A script that polls the usage endpoint with your subscription login falls outside that.
+
+As of October 2026, enforcement has targeted third-party tools that use subscription
+logins to *run the model*, often by impersonating Claude Code. We're not aware of
+accounts being suspended for reading their own usage numbers, and several community
+tools poll the same endpoint. That isn't a guarantee.
+
+This project keeps its footprint small:
+- it only reads, and only your own account;
+- it never makes model requests;
+- it makes a few dozen calls on a typical day;
+- it sends an honest `User-Agent` (`claude-usage-bridge/1.0`) instead of impersonating Claude Code.
+
+There is a supported alternative with no terms question: Claude Code passes the same
+5-hour and weekly percentages to your [status line](https://code.claude.com/docs/en/statusline)
+script (`rate_limits.five_hour` / `rate_limits.seven_day`) after every response. This
+project doesn't use that source yet, but it would be a drop-in replacement for the
+endpoint.
 
 ## Credits
 
