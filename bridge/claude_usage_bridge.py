@@ -10,10 +10,12 @@ with the login Claude Code already keeps in ~/.claude/.credentials.json, and
 streams the numbers to the ESP32 display over USB serial.
 
 The endpoint is undocumented and has been reported to lock clients out with
-long-lived 429s when polled aggressively, so this polls every 5 minutes,
-never more than once a minute (even on tap-to-refresh), and backs off hard
-on 429. The token never leaves this machine; the bridge never refreshes it
-(that would rotate Claude Code's refresh token), it just re-reads the file.
+long-lived 429s when polled aggressively, so polling follows activity: every
+5 minutes while Claude Code is in use (seen from its transcript files), hourly
+when idle, once after each limit resets, never more than once a minute (even
+on tap-to-refresh), with hard back-off on 429. The token never leaves this
+machine; the bridge never refreshes it (that would rotate Claude Code's
+refresh token), it just re-reads the file.
 """
 
 from __future__ import annotations
@@ -37,7 +39,8 @@ import serial
 from serial.tools import list_ports
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CREDS_PATH = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / ".credentials.json"
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+CREDS_PATH = CLAUDE_DIR / ".credentials.json"
 CACHE_PATH = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "claude-usage-bridge" / "state.json"
 PORT_GLOB = "/dev/serial/by-id/usb-Espressif*"
 ESPRESSIF_VID = 0x303A
@@ -47,6 +50,7 @@ HEARTBEAT = 10        # resend state to the board this often
 RATE_LIMIT_BASE = 900 # first back-off after a 429
 RATE_LIMIT_MAX = 3600
 AUTH_RETRY = 1800     # retry after 401 even if the credentials file hasn't changed
+ACTIVITY_CHECK = 15   # how often to look at Claude Code's files for activity
 
 log = logging.getLogger("claude-usage-bridge")
 
@@ -133,8 +137,12 @@ def parse_usage(data: dict) -> tuple[dict | None, dict | None]:
 
 
 class Poller:
-    def __init__(self, interval: int):
-        self.interval = interval
+    def __init__(self, interval: int, idle_interval: int, active_window: int):
+        self.interval = interval            # while Claude Code is active
+        self.idle_interval = idle_interval  # while it isn't
+        self.active_window = active_window  # how long after the last activity counts as active
+        self._activity = 0.0
+        self._activity_checked = -ACTIVITY_CHECK
         self.five_hour: dict | None = None
         self.seven_day: dict | None = None
         self.fetched_at = 0       # last successful fetch
@@ -165,10 +173,8 @@ class Poller:
         self.rate_limit_strikes = int(c.get("rate_limit_strikes", 0))
         self.auth_mtime = float(c.get("auth_mtime", 0.0))
         now = int(time.time())
-        saved_next = int(c.get("next_poll_at", 0))
-        self.next_poll_at = max(saved_next, self.last_attempt + MIN_GAP) if saved_next else now
-        if self.status == "ok":
-            self.next_poll_at = min(self.next_poll_at, self.last_attempt + self.interval)
+        # Only used for retry/back-off states; "ok" is scheduled from activity.
+        self.next_poll_at = int(c.get("next_poll_at", 0)) or now
         log.info("loaded cached usage from %s (fetched %ds ago)", CACHE_PATH,
                  now - self.fetched_at if self.fetched_at else -1)
 
@@ -185,12 +191,58 @@ class Poller:
         tmp.replace(CACHE_PATH)
 
     # -- scheduling
+    def last_activity(self) -> float:
+        """Newest write to Claude Code's transcripts or prompt history (cached briefly)."""
+        mono = time.monotonic()
+        if mono - self._activity_checked < ACTIVITY_CHECK:
+            return self._activity
+        self._activity_checked = mono
+        newest = 0.0
+        try:
+            newest = (CLAUDE_DIR / "history.jsonl").stat().st_mtime
+        except OSError:
+            pass
+        try:
+            with os.scandir(CLAUDE_DIR / "projects") as projects:
+                for proj in projects:
+                    if not proj.is_dir(follow_symlinks=False):
+                        continue
+                    with os.scandir(proj.path) as files:
+                        for f in files:
+                            if f.name.endswith(".jsonl"):
+                                newest = max(newest, f.stat().st_mtime)
+        except OSError:
+            pass
+        self._activity = newest
+        return newest
+
+    def is_active(self, now: float) -> bool:
+        return now - self.last_activity() < self.active_window
+
+    def scheduled_at(self, now: float) -> float:
+        """When the next poll should happen."""
+        if self.status not in ("ok", "starting"):
+            return self.next_poll_at  # explicit retry / back-off time
+        last_act = self.last_activity()
+        if now - last_act < self.active_window:
+            nxt = self.last_attempt + self.interval
+        elif last_act > self.last_attempt:
+            nxt = now  # there was activity we haven't polled since; catch up once
+        else:
+            nxt = self.last_attempt + self.idle_interval
+        # Look again shortly after a window resets so the bar drops promptly.
+        for w in (self.five_hour, self.seven_day):
+            resets = (w or {}).get("resets_at") or 0
+            if resets > self.last_attempt:
+                nxt = min(nxt, resets + 20)
+        return max(nxt, self.last_attempt + MIN_GAP)
+
     def due(self, now: float) -> bool:
         if now - self.last_attempt < MIN_GAP:
             return False
         if self.status == "auth" and creds_mtime() != self.auth_mtime:
             return True  # Claude Code refreshed the login; try right away
-        return now >= self.next_poll_at
+        return now >= self.scheduled_at(now)
 
     def can_refresh_now(self, now: float) -> tuple[bool, str]:
         if self.status == "rate_limited" and now < self.next_poll_at:
@@ -199,14 +251,6 @@ class Poller:
         if wait > 0:
             return False, f"Just updated - try again in {wait}s"
         return True, ""
-
-    def _schedule_ok(self, now: int):
-        nxt = now + self.interval
-        # Look again shortly after a window resets so the bar drops promptly.
-        for w in (self.five_hour, self.seven_day):
-            if w and w.get("resets_at", 0) > now:
-                nxt = min(nxt, max(w["resets_at"] + 20, now + MIN_GAP))
-        self.next_poll_at = nxt
 
     # -- the actual call
     def fetch(self):
@@ -266,10 +310,9 @@ class Poller:
                 self.status, self.detail = "ok", ""
                 self.rate_limit_strikes = 0
                 self.offline_strikes = 0
-                self._schedule_ok(now)
-                log.info("5h %s%% | week %s%% | next poll in %ds",
+                log.info("5h %s%% | week %s%% | next poll in ~%ds",
                          five and round(five["pct"], 1), seven and round(seven["pct"], 1),
-                         self.next_poll_at - now)
+                         self.scheduled_at(now) - now)
         self._save_cache()
 
     def _handle_http_error(self, e: urllib.error.HTTPError, now: int):
@@ -304,7 +347,7 @@ class Poller:
             "detail": self.detail,
             "notice": notice,
             "fetched_at": self.fetched_at,
-            "next_poll_at": int(self.next_poll_at),
+            "next_poll_at": int(self.scheduled_at(time.time())),
             "five_hour": self.five_hour,
             "seven_day": self.seven_day,
         }
@@ -397,7 +440,12 @@ class DeviceLink:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", help="serial port (default: first Espressif USB device)")
-    ap.add_argument("--interval", type=int, default=300, help="seconds between polls (default 300, minimum 120)")
+    ap.add_argument("--interval", type=int, default=300,
+                    help="seconds between polls while Claude Code is active (default 300, minimum 120)")
+    ap.add_argument("--idle-interval", type=int, default=3600,
+                    help="seconds between polls while it's idle (default 3600, minimum 600)")
+    ap.add_argument("--active-window", type=int, default=600,
+                    help="seconds after the last Claude Code activity that still count as active (default 600)")
     ap.add_argument("--brightness", type=int, help="set display brightness 0-100 on connect")
     ap.add_argument("--once", action="store_true", help="fetch once, print the result, and exit")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -409,8 +457,12 @@ def main():
     if args.interval < 120:
         log.warning("interval %ds is too aggressive for this endpoint; using 120s", args.interval)
         args.interval = 120
+    if args.idle_interval < 600:
+        log.warning("idle interval %ds is too aggressive; using 600s", args.idle_interval)
+        args.idle_interval = 600
+    args.idle_interval = max(args.idle_interval, args.interval)
 
-    poller = Poller(args.interval)
+    poller = Poller(args.interval, args.idle_interval, max(60, args.active_window))
 
     if args.once:
         if time.time() - poller.last_attempt < MIN_GAP:
@@ -432,9 +484,16 @@ def main():
 
     last_sent = 0.0
     last_hello = 0.0
-    log.info("polling every %ds; cache at %s", args.interval, CACHE_PATH)
+    was_active = None
+    log.info("polling every %ds while Claude Code is active, every %ds when idle; cache at %s",
+             args.interval, args.idle_interval, CACHE_PATH)
 
     while running:
+        active = poller.is_active(time.time())
+        if active != was_active:
+            log.info("Claude Code %s", "active" if active else "idle")
+            was_active = active
+
         newly_connected = not link.connected() and link.try_connect()
         notice = ""
         push = newly_connected

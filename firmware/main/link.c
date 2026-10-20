@@ -14,7 +14,7 @@
 #include "imu.h"
 #include "orient.h"
 
-#define FW_VERSION         "1.1.0"
+#define FW_VERSION         "1.2.0"
 #define LINK_LINE_MAX      1536
 #define BRIDGE_TIMEOUT_US  (45LL * 1000 * 1000)
 #define HELLO_EVERY_US     (5LL * 1000 * 1000)

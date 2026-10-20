@@ -32,13 +32,13 @@ how long ago the numbers were fetched, and a small pixel crab that reacts to you
 
 - **Live plan limits:** the same numbers Claude Code's `/usage` shows, for both the 5-hour session window and the weekly limit.
 - **Reset countdowns** in relative and local time ("Resets in 2h 14m (3:40 PM)").
-- **Freshness indicator:** "Updated 2m ago" with a green, amber or red dot.
+- **Freshness indicator:** "Updated 2m ago" with a dot that's green while the bridge is on schedule and turns amber, then red, when a poll is overdue.
 - **Pixel crab** in the style of Claude Code's mascot. It walks, blinks, sweats at 75%, panics at 95%, and falls asleep when the PC disconnects.
 - **Tap to refresh**, limited to once a minute.
 - **Auto-rotate** using the on-board accelerometer, so it reads correctly on any edge.
 - **BOOT button** cycles brightness (100 / 70 / 40 / 15%). The setting is remembered.
 - **Burn-in protection:** the whole UI shifts a few pixels every 2 minutes.
-- **Rate-limit friendly:** polls every 5 minutes, backs off hard on 429s, and keeps its schedule across restarts.
+- **Smart polling:** every 5 minutes while you're using Claude Code, hourly when you're not, and once after each limit resets. It backs off hard on 429s and keeps its schedule across restarts.
 - **Your token never leaves your computer.** The board has no network access and holds no credentials.
 
 ## How it works
@@ -58,8 +58,8 @@ how long ago the numbers were fetched, and a small pixel crab that reacts to you
 ```
 
 A small Python **bridge** runs on your computer. It reads the OAuth token Claude Code
-already keeps, calls the usage endpoint, and streams the results over the USB cable as
-JSON lines. The **firmware** only draws them. The board gets the time from the same
+already keeps, calls the usage endpoint (more often while you're using Claude Code, less
+when you're not), and streams the results over the USB cable as JSON lines. The **firmware** only draws them. The board gets the time from the same
 messages, so countdowns and "Updated X ago" keep ticking between polls and even if the
 PC goes away.
 
@@ -158,9 +158,9 @@ sideways orientations come out upside down, run it again with `--flip`.
 
 | Footer | Meaning |
 |---|---|
-| ● green "Updated 2m ago" | Data is fresh (under 11 min) |
-| ● amber | Data is stale (11–30 min), usually because the last poll failed |
-| ● red | Over 30 min old, or an error |
+| ● green "Updated 2m ago" | The bridge is on schedule. During idle periods that can mean data up to an hour old, which is fine because usage only changes while you use Claude. |
+| ● amber | A scheduled poll is 2–30 min overdue (it failed, is rate limited, or the bridge is gone) |
+| ● red | A poll is more than 30 min overdue, or an error |
 | "Rate limited - next try in 14m" | The endpoint returned 429; the bridge is backing off |
 | "Login expired - open Claude Code" | The OAuth token expired. Run `claude` once and it recovers by itself. |
 | "Can't reach Anthropic - retrying" | Network problem on the computer |
@@ -173,16 +173,37 @@ or more, and sleeps when the bridge is gone.
 ## The bridge
 
 ```
-uv run bridge/claude_usage_bridge.py [--interval 300] [--brightness N] [--port PATH] [--once] [-v]
+uv run bridge/claude_usage_bridge.py [--interval 300] [--idle-interval 3600] [--active-window 600]
+                                     [--brightness N] [--port PATH] [--once] [-v]
 ```
 
 | Option | |
 |---|---|
-| `--interval` | Seconds between polls. Default 300; anything under 120 is raised to 120. |
+| `--interval` | Seconds between polls while Claude Code is active. Default 300; anything under 120 is raised to 120. |
+| `--idle-interval` | Seconds between polls while it's idle. Default 3600; anything under 600 is raised to 600. |
+| `--active-window` | How long after the last Claude Code activity still counts as active. Default 600 seconds. |
 | `--brightness` | Set the display brightness (0–100) whenever the board connects. Without it, the BOOT-button setting is kept. |
 | `--port` | Serial port. By default it uses the first Espressif USB device. |
 | `--once` | Fetch once (unless the last call was under a minute ago), print the result, and exit. Handy for testing. |
 | `-v` | Debug logging, including the board's own log lines. |
+
+### Smart polling
+
+Your usage only changes while you're using Claude, so the bridge polls based on activity.
+It detects Claude Code activity locally from file timestamps: it looks at
+`~/.claude/projects/*/*.jsonl` and `~/.claude/history.jsonl` every 15 seconds and reads
+nothing from them.
+
+| Situation | Poll |
+|---|---|
+| Claude Code wrote a transcript in the last 10 min | every 5 min |
+| Idle, but there was activity since the last poll | once, straight away (catch-up) |
+| Idle | every 60 min, which also catches claude.ai or desktop-app use |
+| A 5-hour or weekly window just passed its reset time | once, 20 s after the reset |
+
+A typical day comes to a few dozen requests instead of 288 at a flat 5 minutes.
+"Updated X ago" and the countdowns keep ticking on the board between polls. Tap the
+screen to force a refresh any time.
 
 ### Rate limits
 
@@ -192,7 +213,7 @@ that poll it aggressively have reported **persistent 429s lasting 30+ minutes**
 [#31637](https://github.com/anthropics/claude-code/issues/31637)). The bridge is
 deliberately conservative:
 
-- It polls every **5 minutes**, plus once just after a window resets so the bar drops promptly.
+- It polls at most every **5 minutes**, and much less when you're idle (see above).
 - There's a hard floor of **60 seconds** between calls, which also applies to tap-to-refresh.
 - On **429** it backs off 15 → 30 → 60 minutes and honors `Retry-After`.
 - Its schedule and last result are saved to `~/.cache/claude-usage-bridge/state.json`, so restarting the bridge or replugging the board never triggers an extra call. The board gets the cached numbers immediately.

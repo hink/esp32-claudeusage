@@ -22,8 +22,8 @@
 #define COL_RED      0xE5534B
 #define COL_GREEN    0x5DBB63
 
-#define FRESH_SECS   (11 * 60)  // two missed 5-minute polls before we call it stale
-#define STALE_SECS   (30 * 60)
+#define LATE_SECS    120        // a scheduled poll this overdue turns the dot amber
+#define STALE_SECS   (30 * 60)  // ...and this overdue turns it red
 
 typedef struct {
     lv_obj_t *title;
@@ -216,7 +216,10 @@ static void footer_update(const link_state_t *st, int64_t now, bool alive)
             fmt_dur(dur, sizeof(dur), age);
             snprintf(ago, sizeof(ago), "Updated %s ago", dur);
         }
-        dot = age <= FRESH_SECS ? COL_GREEN : age <= STALE_SECS ? COL_AMBER : COL_RED;
+        // The bridge polls less often while Claude Code is idle, so judge
+        // freshness by whether it's keeping to its own schedule, not by age.
+        int64_t overdue = st->next_poll_at ? now - st->next_poll_at : age - 11 * 60;
+        dot = overdue <= LATE_SECS ? COL_GREEN : overdue <= STALE_SECS ? COL_AMBER : COL_RED;
     }
 
     if (s_refreshing) {
@@ -257,6 +260,8 @@ static void footer_update(const link_state_t *st, int64_t now, bool alive)
 
     if (strcmp(st->status, "auth") == 0 || strcmp(st->status, "error") == 0) {
         dot = COL_RED;
+    } else if ((strcmp(st->status, "rate_limited") == 0 || strcmp(st->status, "offline") == 0) && dot == COL_GREEN) {
+        dot = COL_AMBER;
     }
 
     set_text(s_ago, ago);
