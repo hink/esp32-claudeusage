@@ -26,7 +26,6 @@ import glob
 import json
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -52,6 +51,8 @@ RATE_LIMIT_BASE = 900 # first back-off after a 429
 RATE_LIMIT_MAX = 3600
 AUTH_RETRY = 1800     # retry after 401 even if the credentials file hasn't changed
 ACTIVITY_CHECK = 15   # how often to look at Claude Code's files for activity
+MAX_METERS = 3        # what the display has room for
+LABEL_MAX = 23        # longest meter title the firmware keeps
 
 log = logging.getLogger("claude-usage-bridge")
 
@@ -107,10 +108,13 @@ def read_credentials() -> dict:
 
 
 def plan_label(oauth: dict) -> str:
+    # Max 5x is now called Max and Max 20x is Ultra, but Claude Code's
+    # credentials still carry the old tier ids under subscriptionType "max".
     tier = (oauth.get("rateLimitTier") or "").lower()
-    m = re.search(r"max_(\d+)x", tier)
-    if m:
-        return f"Max {m.group(1)}x"
+    if "max_20x" in tier:
+        return "Ultra"
+    if "max_5x" in tier:
+        return "Max"
     sub = oauth.get("subscriptionType") or ""
     return sub.capitalize()
 
@@ -122,19 +126,35 @@ def creds_mtime() -> float:
         return 0.0
 
 
-def parse_usage(data: dict) -> tuple[dict | None, dict | None]:
-    """Pull the 5-hour and weekly windows, tolerating either response shape."""
+def parse_usage(data: dict) -> list[dict]:
+    """The limits to show, in display order: the 5-hour window if the plan has
+    one (Ultra normally doesn't), the weekly limit, then per-model weekly
+    limits such as Fable. Tolerates either shape the endpoint has used for the
+    first two."""
+    limits = [limit for limit in data.get("limits") or [] if isinstance(limit, dict)]
 
-    def window(key: str, kind: str):
+    def meter(label: str, kind: str, pct, resets_at) -> dict:
+        return {"label": label, "kind": kind, "pct": float(pct), "resets_at": iso_to_epoch(resets_at)}
+
+    def window(key: str, kind: str, label: str):
         w = data.get(key)
         if isinstance(w, dict) and w.get("utilization") is not None:
-            return {"pct": float(w["utilization"]), "resets_at": iso_to_epoch(w.get("resets_at"))}
-        for limit in data.get("limits") or []:
+            return meter(label, kind, w["utilization"], w.get("resets_at"))
+        for limit in limits:
             if limit.get("kind") == kind and limit.get("percent") is not None:
-                return {"pct": float(limit["percent"]), "resets_at": iso_to_epoch(limit.get("resets_at"))}
+                return meter(label, kind, limit["percent"], limit.get("resets_at"))
         return None
 
-    return window("five_hour", "session"), window("seven_day", "weekly_all")
+    meters = [window("five_hour", "session", "5-hour limit"),
+              window("seven_day", "weekly_all", "Weekly limit")]
+    for limit in limits:
+        name = ((limit.get("scope") or {}).get("model") or {}).get("display_name")
+        if limit.get("kind") == "weekly_scoped" and name and limit.get("percent") is not None:
+            label = f"{name} weekly limit"
+            if len(label) > LABEL_MAX:
+                label = name[:LABEL_MAX]
+            meters.append(meter(label, "weekly_scoped", limit["percent"], limit.get("resets_at")))
+    return [m for m in meters if m][:MAX_METERS]
 
 
 class Poller:
@@ -144,8 +164,7 @@ class Poller:
         self.active_window = active_window  # how long after the last activity counts as active
         self._activity = 0.0
         self._activity_checked = -ACTIVITY_CHECK
-        self.five_hour: dict | None = None
-        self.seven_day: dict | None = None
+        self.meters: list[dict] = []  # see parse_usage()
         self.fetched_at = 0       # last successful fetch
         self.last_attempt = 0     # last API call of any outcome
         self.next_poll_at = 0
@@ -164,8 +183,10 @@ class Poller:
         except (OSError, json.JSONDecodeError):
             self.next_poll_at = int(time.time())
             return
-        self.five_hour = c.get("five_hour")
-        self.seven_day = c.get("seven_day")
+        self.meters = c.get("meters")
+        if self.meters is None:  # cache from before per-model limits; the next poll fills in the rest
+            old = (("five_hour", "session", "5-hour limit"), ("seven_day", "weekly_all", "Weekly limit"))
+            self.meters = [{"label": label, "kind": kind, **c[key]} for key, kind, label in old if c.get(key)]
         self.fetched_at = int(c.get("fetched_at", 0))
         self.last_attempt = int(c.get("last_attempt", 0))
         self.status = c.get("status", "starting")
@@ -183,7 +204,7 @@ class Poller:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = CACHE_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps({
-            "five_hour": self.five_hour, "seven_day": self.seven_day,
+            "meters": self.meters,
             "fetched_at": self.fetched_at, "last_attempt": self.last_attempt,
             "next_poll_at": self.next_poll_at, "status": self.status, "detail": self.detail,
             "plan": self.plan, "rate_limit_strikes": self.rate_limit_strikes,
@@ -232,8 +253,8 @@ class Poller:
         else:
             nxt = self.last_attempt + self.idle_interval
         # Look again shortly after a window resets so the bar drops promptly.
-        for w in (self.five_hour, self.seven_day):
-            resets = (w or {}).get("resets_at") or 0
+        for m in self.meters:
+            resets = m.get("resets_at") or 0
             if resets > self.last_attempt:
                 nxt = min(nxt, resets + 20)
         return max(nxt, self.last_attempt + MIN_GAP)
@@ -300,19 +321,24 @@ class Poller:
             self.next_poll_at = now + self.interval
             log.warning("bad JSON from endpoint: %s", e)
         else:
-            five, seven = parse_usage(data)
-            if five is None and seven is None:
+            try:
+                meters = parse_usage(data)
+            except (AttributeError, TypeError, ValueError) as e:
+                log.warning("couldn't read the usage response: %r", e)
+                meters = []
+            if not meters:
                 self.status, self.detail = "error", "usage response format changed"
                 self.next_poll_at = now + self.interval
-                log.warning("no usage windows in response; keys: %s", sorted(data)[:12])
+                log.warning("no usage limits in response; keys: %s",
+                            sorted(data)[:12] if isinstance(data, dict) else type(data).__name__)
             else:
-                self.five_hour, self.seven_day = five, seven
+                self.meters = meters
                 self.fetched_at = now
                 self.status, self.detail = "ok", ""
                 self.rate_limit_strikes = 0
                 self.offline_strikes = 0
-                log.info("5h %s%% | week %s%% | next poll in ~%ds",
-                         five and round(five["pct"], 1), seven and round(seven["pct"], 1),
+                log.info("%s | next poll in ~%ds",
+                         " | ".join(f"{m['label']} {round(m['pct'], 1)}%" for m in meters),
                          self.scheduled_at(now) - now)
         self._save_cache()
 
@@ -349,8 +375,7 @@ class Poller:
             "notice": notice,
             "fetched_at": self.fetched_at,
             "next_poll_at": int(self.scheduled_at(time.time())),
-            "five_hour": self.five_hour,
-            "seven_day": self.seven_day,
+            "meters": self.meters,
         }
 
 

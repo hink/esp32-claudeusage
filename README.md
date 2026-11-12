@@ -2,23 +2,24 @@
 
 A desk display that shows your **Claude plan limits** in real time on a
 [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm):
-one bar for the **5-hour window** and one for the **weekly limit**, with reset countdowns,
-how long ago the numbers were fetched, and a small pixel crab that reacts to your usage.
+a bar for each limit your plan has (the **weekly limit**, the **Fable weekly limit**, and
+the **5-hour window** on plans that have one), with reset countdowns, how long ago the
+numbers were fetched, and a small pixel crab that reacts to your usage.
 
 ```
 ┌────────────────────────────────────────┐
 │                ▐▛███▜▌                 │
 │               ▝▜█████▛▘                │
 │                 ▘▘ ▝▝                  │
-│            CLAUDE MAX 20X              │
+│             CLAUDE ULTRA               │
 │                                        │
-│  5-hour limit                     42%  │
-│  ████████████████░░░░░░░░░░░░░░░░░░░░  │
-│  Resets in 2h 14m  (3:40 PM)           │
+│  Weekly limit                     10%  │
+│  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+│  Resets in 1d 13h  (Fri 10:00 AM)      │
 │                                        │
-│  Weekly limit                      6%  │
-│  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
-│  Resets in 3d 1h  (Thu 11:00 AM)       │
+│  Fable weekly limit               15%  │
+│  █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+│  Resets in 1d 13h  (Fri 10:00 AM)      │
 │                                        │
 │           ● Updated 2m ago             │
 │   Next update in 3m - tap to refresh   │
@@ -32,7 +33,7 @@ how long ago the numbers were fetched, and a small pixel crab that reacts to you
 
 ## Features
 
-- **Live plan limits:** the same numbers Claude Code's `/usage` shows, for both the 5-hour session window and the weekly limit.
+- **Live plan limits:** the same numbers Claude Code's `/usage` shows: the weekly limit, per-model weekly limits such as Fable, and the 5-hour session window on plans that have one.
 - **Reset countdowns** in relative and local time ("Resets in 2h 14m (3:40 PM)").
 - **Freshness indicator:** "Updated 2m ago" with a dot that's green while the bridge is on schedule and turns amber, then red, when a poll is overdue.
 - **Pixel crab** in the style of Claude Code's mascot. It walks, blinks, sweats at 75%, panics at 95%, and falls asleep when the PC disconnects.
@@ -75,7 +76,7 @@ there's also no Wi-Fi setup and no secrets on the device.
 | | |
 |---|---|
 | Display | Waveshare **ESP32-C6-Touch-AMOLED-2.16** (480×480 AMOLED, CST9217 touch, QMI8658 IMU, AXP2101 PMIC) |
-| Claude | Claude Code logged in with a **Pro or Max** subscription (`claude` → `/login`). API-key users have no plan limits to show. |
+| Claude | Claude Code logged in with a **Pro, Max or Ultra** subscription (`claude` → `/login`). API-key users have no plan limits to show. |
 | Computer | Linux with systemd (tested on Fedora 44). macOS should work for the bridge, but it's untested. See [macOS](#macos). |
 | Tools | [`uv`](https://docs.astral.sh/uv/) for the Python scripts and [ESP-IDF v5.5](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c6/get-started/) to build the firmware |
 
@@ -167,6 +168,21 @@ sideways orientations come out upside down, run it again with `--flip`.
 | **BOOT button** | Cycle brightness: 100 → 70 → 40 → 15%. |
 | **Turn it** | The UI rotates once the board has been steady for about 0.5 s. Lying flat keeps the last orientation. |
 
+**Meters:** the display shows up to three limits, whichever ones the endpoint reports
+for your account, in this order:
+
+| Meter | Shown when |
+|---|---|
+| 5-hour limit | The endpoint reports a 5-hour window for your account. Ultra normally has none, so it gets no empty bar. |
+| Weekly limit | Always. This is the all-models weekly limit. |
+| Fable weekly limit | Your plan has a separate weekly limit for a model. It's named after whatever model the endpoint reports. |
+
+With three meters the layout tightens up and the reset line moves under the title.
+
+**Plan name:** shown under the crab, using Anthropic's current names (Pro, Max, Ultra).
+Claude Code's credentials still carry the old tier ids, so the bridge shows
+`max_5x` as Max and `max_20x` as Ultra.
+
 **Bar colors:** orange below 75%, amber from 75%, red from 90%.
 
 **Status dot and footer:**
@@ -180,9 +196,9 @@ sideways orientations come out upside down, run it again with `--flip`.
 | "Login expired - open Claude Code" | The OAuth token expired. Run `claude` once and it recovers by itself. |
 | "Can't reach Anthropic - retrying" | Network problem on the computer |
 | "PC bridge disconnected" | No message from the bridge for 45 s. The crab goes to sleep. |
-| "Limit reset - updating soon" | A window passed its reset time; the bridge polls shortly after |
+| "Limit reset - updating soon" | A limit passed its reset time; the bridge polls shortly after |
 
-**Crab moods:** walks normally, sweats at 75% or more on either limit, panics at 95%
+**Crab moods:** walks normally, sweats at 75% or more on any limit, panics at 95%
 or more, and sleeps when the bridge is gone.
 
 ## The bridge
@@ -214,7 +230,7 @@ nothing from them.
 | Claude Code wrote a transcript in the last 10 min | every 5 min |
 | Idle, but there was activity since the last poll | once, straight away (catch-up) |
 | Idle | every 60 min, which also catches claude.ai or desktop-app use |
-| A 5-hour or weekly window just passed its reset time | once, 20 s after the reset |
+| A limit just passed its reset time | once, 20 s after the reset |
 | Display unplugged | never; it polls once when you plug it back in, if a poll came due |
 
 A typical day comes to a few dozen requests instead of 288 at a flat 5 minutes.
@@ -250,9 +266,13 @@ There's no launchd service file; run the bridge in a terminal or write a LaunchA
 
 ### Response format
 
-The bridge accepts both shapes the endpoint has used: `five_hour` / `seven_day`
-objects with `utilization` and `resets_at`, and the newer `limits` array
-(`kind: "session"` / `"weekly_all"`). If neither is present, the display shows
+The bridge reads the 5-hour and weekly limits from either shape the endpoint has used:
+`five_hour` / `seven_day` objects with `utilization` and `resets_at`, or the newer
+`limits` array (`kind: "session"` / `"weekly_all"`). Per-model limits come from `limits`
+entries with `kind: "weekly_scoped"` and are named by their `scope.model.display_name`.
+
+A plan without a 5-hour window gets `five_hour: null` and no `session` entry, and the
+display leaves that meter out. If the response has no limits at all, the display shows
 "usage response format changed".
 
 ## Serial protocol
@@ -264,7 +284,7 @@ port. Opening the port with the default DTR/RTS doesn't reset the board.
 
 | Message | Purpose |
 |---|---|
-| `{"type":"state","now":…,"tz":…,"plan":"Max 20x","status":"ok","detail":"","notice":"","fetched_at":…,"next_poll_at":…,"five_hour":{"pct":42.0,"resets_at":…},"seven_day":{…}}` | Full state. Sent after each poll and every 10 s as a heartbeat. Times are Unix seconds; `tz` is the UTC offset in seconds. |
+| `{"type":"state","now":…,"tz":…,"plan":"Ultra","status":"ok","detail":"","notice":"","fetched_at":…,"next_poll_at":…,"meters":[{"label":"Weekly limit","kind":"weekly_all","pct":10.0,"resets_at":…},{"label":"Fable weekly limit","kind":"weekly_scoped",…}]}` | Full state. Sent after each poll and every 10 s as a heartbeat. Times are Unix seconds; `tz` is the UTC offset in seconds. `meters` holds up to three limits in display order; `kind` is `session`, `weekly_all` or `weekly_scoped`. |
 | `{"type":"config","brightness":70}` | Set brightness |
 | `{"type":"notice","text":"…","secs":5}` | Show a temporary footer message |
 | `{"type":"imu"}` / `{"type":"imu_stream","secs":30}` | One accelerometer reading, or a 10 Hz stream |
@@ -274,7 +294,7 @@ port. Opening the port with the default DTR/RTS doesn't reset the board.
 
 | Message | Purpose |
 |---|---|
-| `@{"type":"hello","fw":"1.2.0"}` | Sent every 5 s until the computer talks. The bridge replies with the cached state. |
+| `@{"type":"hello","fw":"1.3.0"}` | Sent every 5 s until the computer talks. The bridge replies with the cached state. |
 | `@{"type":"refresh"}` | The screen was tapped |
 | `@{"type":"imu","x":…,"y":…,"z":…,"up":1,"rot":0,"cal":[1,3,0]}` | Accelerometer reading |
 
@@ -328,7 +348,7 @@ Bluetooth are never started.
 
 **Use this at your own risk.**
 
-- **Consumer Terms:** Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms), which cover Free, Pro and Max, prohibit accessing the services "through automated or non-human means, whether through a bot, script, or otherwise" unless you use an API key.
+- **Consumer Terms:** Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms), which cover Free, Pro, Max and Ultra, prohibit accessing the services "through automated or non-human means, whether through a bot, script, or otherwise" unless you use an API key.
 - **Claude Code's legal page:** Claude Code's [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) says subscription OAuth "is designed to support ordinary use of Claude Code and other native Anthropic applications." Anthropic may enforce this "without prior notice."
 
 A script that polls the usage endpoint with your subscription login falls outside that.

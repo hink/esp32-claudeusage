@@ -14,7 +14,7 @@
 #include "imu.h"
 #include "orient.h"
 
-#define FW_VERSION         "1.2.0"
+#define FW_VERSION         "1.3.0"
 #define LINK_LINE_MAX      1536
 #define BRIDGE_TIMEOUT_US  (45LL * 1000 * 1000)
 #define HELLO_EVERY_US     (5LL * 1000 * 1000)
@@ -74,19 +74,25 @@ static void json_str(const cJSON *obj, const char *key, char *dst, size_t len)
     }
 }
 
-static void parse_window(const cJSON *root, const char *key, usage_window_t *w)
+static void parse_meters(const cJSON *root)
 {
-    const cJSON *obj = cJSON_GetObjectItemCaseSensitive(root, key);
-    const cJSON *pct = cJSON_GetObjectItemCaseSensitive(obj, "pct");
-    if (!cJSON_IsObject(obj) || !cJSON_IsNumber(pct)) {
-        w->valid = false;
-        w->pct = 0;
-        w->resets_at = 0;
-        return;
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "meters");
+    const cJSON *it;
+    uint8_t n = 0;
+    cJSON_ArrayForEach(it, list) {
+        const cJSON *pct = cJSON_GetObjectItemCaseSensitive(it, "pct");
+        if (n == LINK_MAX_METERS || !cJSON_IsNumber(pct)) {
+            continue;
+        }
+        usage_meter_t *m = &s_state.meters[n++];
+        char kind[16];
+        json_str(it, "label", m->label, sizeof(m->label));
+        json_str(it, "kind", kind, sizeof(kind));
+        m->pct = (float)pct->valuedouble;
+        m->resets_at = json_i64(it, "resets_at", 0);
+        m->weekly = strcmp(kind, "session") != 0;
     }
-    w->valid = true;
-    w->pct = (float)pct->valuedouble;
-    w->resets_at = json_i64(obj, "resets_at", 0);
+    s_state.meter_count = n;
 }
 
 static void handle_line(const char *line)
@@ -134,8 +140,7 @@ static void handle_line(const char *line)
         if (fetched_at > 0) {
             s_state.fetched_at = fetched_at;
             s_state.have_usage = true;
-            parse_window(root, "five_hour", &s_state.five_hour);
-            parse_window(root, "seven_day", &s_state.seven_day);
+            parse_meters(root);
         }
     } else if (strcmp(t, "config") == 0) {
         const cJSON *b = cJSON_GetObjectItemCaseSensitive(root, "brightness");

@@ -11,7 +11,6 @@
 #include "nvs.h"
 
 #define MARGIN       36
-#define BAR_H        28
 
 #define COL_TEXT     0xF2EFEA
 #define COL_MUTED    0x8C8781
@@ -37,8 +36,8 @@ static lv_obj_t *s_plan;
 static lv_obj_t *s_dot;
 static lv_obj_t *s_ago;
 static lv_obj_t *s_detail;
-static meter_t s_m5;
-static meter_t s_m7;
+static meter_t s_meters[LINK_MAX_METERS];
+static int s_meters_shown;
 
 static uint8_t s_brightness;
 static bool s_btn_was_down;
@@ -118,34 +117,55 @@ static uint32_t level_color(float pct)
 
 // ---------------------------------------------------------------- meters
 
-static void meter_create(meter_t *m, const char *title, int y)
+static void meter_create(meter_t *m)
 {
     m->title = make_label(s_root, &lv_font_montserrat_20, COL_TEXT);
-    lv_label_set_text(m->title, title);
-    lv_obj_set_pos(m->title, MARGIN, y + 17);
-
     m->pct = make_label(s_root, &lv_font_montserrat_40, COL_TEXT);
-    lv_label_set_text(m->pct, "--");
-    lv_obj_align(m->pct, LV_ALIGN_TOP_RIGHT, -MARGIN, y);
 
     m->bar = lv_bar_create(s_root);
-    lv_obj_set_size(m->bar, BOARD_LCD_H_RES - 2 * MARGIN, BAR_H);
-    lv_obj_set_pos(m->bar, MARGIN, y + 56);
     lv_obj_remove_flag(m->bar, LV_OBJ_FLAG_CLICKABLE);
     lv_bar_set_range(m->bar, 0, 1000);
     lv_obj_set_style_bg_color(m->bar, lv_color_hex(COL_TRACK), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(m->bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(m->bar, BAR_H / 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(m->bar, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(m->bar, lv_color_hex(COL_ORANGE), LV_PART_INDICATOR);
-    lv_obj_set_style_radius(m->bar, BAR_H / 2, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(m->bar, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
     lv_obj_set_style_anim_duration(m->bar, 700, LV_PART_MAIN);
 
     m->sub = make_label(s_root, &lv_font_montserrat_16, COL_MUTED);
-    lv_obj_set_pos(m->sub, MARGIN, y + 94);
 }
 
-static float meter_update(meter_t *m, const usage_window_t *w, bool have_usage, int64_t now, int32_t tz,
-                          bool weekly)
+// One or two meters get the roomy layout: title and percentage, bar, reset
+// line. Three (a plan with a 5-hour window and a per-model limit) only fit
+// with the reset line tucked under the title, beside the percentage.
+static void meters_layout(int count)
+{
+    bool compact = count > 2;
+    int pitch = compact ? 86 : 132;
+    int y = compact ? 150 : 150 + (2 - count) * pitch / 2;
+
+    for (int i = 0; i < LINK_MAX_METERS; i++) {
+        meter_t *m = &s_meters[i];
+        bool hidden = i >= count;
+        lv_obj_update_flag(m->title, LV_OBJ_FLAG_HIDDEN, hidden);
+        lv_obj_update_flag(m->pct, LV_OBJ_FLAG_HIDDEN, hidden);
+        lv_obj_update_flag(m->bar, LV_OBJ_FLAG_HIDDEN, hidden);
+        lv_obj_update_flag(m->sub, LV_OBJ_FLAG_HIDDEN, hidden);
+        if (hidden) {
+            continue;
+        }
+        lv_obj_set_pos(m->title, MARGIN, y + (compact ? 0 : 17));
+        lv_obj_align(m->pct, LV_ALIGN_TOP_RIGHT, -MARGIN, y);
+        lv_obj_set_style_text_font(m->sub, compact ? &lv_font_montserrat_14 : &lv_font_montserrat_16, 0);
+        lv_obj_set_pos(m->sub, MARGIN, y + (compact ? 26 : 94));
+        lv_obj_set_size(m->bar, BOARD_LCD_H_RES - 2 * MARGIN, compact ? 20 : 28);
+        lv_obj_set_pos(m->bar, MARGIN, y + (compact ? 50 : 56));
+        y += pitch;
+    }
+}
+
+// `w` is NULL for the placeholder shown until the bridge reports limits.
+static float meter_update(meter_t *m, const usage_meter_t *w, bool have_usage, int64_t now, int32_t tz)
 {
     char pct[16];
     char sub[80];
@@ -155,7 +175,8 @@ static float meter_update(meter_t *m, const usage_window_t *w, bool have_usage, 
     uint32_t color = COL_ORANGE;
     float shown = 0;
 
-    if (!have_usage || !w->valid) {
+    set_text(m->title, w == NULL ? "Weekly limit" : w->label[0] ? w->label : "Limit");
+    if (w == NULL) {
         snprintf(pct, sizeof(pct), "--");
         snprintf(sub, sizeof(sub), have_usage ? "No data for this limit" : "Waiting for data");
         set_color(m->pct, COL_DIM, 0);
@@ -175,7 +196,7 @@ static float meter_update(meter_t *m, const usage_window_t *w, bool have_usage, 
         set_color(m->pct, shown >= 75 ? color : COL_TEXT, 0);
         if (w->resets_at && now) {
             fmt_dur(when, sizeof(when), w->resets_at - now);
-            fmt_clock(clock, sizeof(clock), w->resets_at, tz, weekly);
+            fmt_clock(clock, sizeof(clock), w->resets_at, tz, w->weekly);
             snprintf(sub, sizeof(sub), "Resets in %s  (%s)", when, clock);
         } else {
             snprintf(sub, sizeof(sub), "Reset time unknown");
@@ -315,11 +336,19 @@ static void ui_tick(lv_timer_t *t)
         set_text(s_plan, plan);
     }
 
-    float p5 = meter_update(&s_m5, &st.five_hour, st.have_usage, now, st.tz_offset, false);
-    float p7 = meter_update(&s_m7, &st.seven_day, st.have_usage, now, st.tz_offset, true);
+    int count = st.have_usage ? st.meter_count : 0;
+    int shown = count > 0 ? count : 1;
+    if (shown != s_meters_shown) {
+        meters_layout(shown);
+        s_meters_shown = shown;
+    }
+    float worst = 0;
+    for (int i = 0; i < shown; i++) {
+        float p = meter_update(&s_meters[i], i < count ? &st.meters[i] : NULL, st.have_usage, now, st.tz_offset);
+        worst = p > worst ? p : worst;
+    }
     footer_update(&st, now, alive);
 
-    float worst = p5 > p7 ? p5 : p7;
     if (!alive) {
         crab_set_mood(CRAB_SLEEP);
     } else if (worst >= 95) {
@@ -399,8 +428,9 @@ void ui_init(uint8_t brightness)
     lv_label_set_text(s_plan, "CLAUDE CODE USAGE");
     lv_obj_align(s_plan, LV_ALIGN_TOP_MID, 0, 118);
 
-    meter_create(&s_m5, "5-hour limit", 150);
-    meter_create(&s_m7, "Weekly limit", 282);
+    for (int i = 0; i < LINK_MAX_METERS; i++) {
+        meter_create(&s_meters[i]);
+    }
 
     lv_obj_t *row = lv_obj_create(s_root);
     lv_obj_remove_style_all(row);
